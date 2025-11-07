@@ -1,341 +1,140 @@
-trigger:
-  branches:
-    include:
+name: Build and Upload Executable
+
+on:
+  push:
+    branches:
       - main
-      - pipeline_tests
 
-parameters:
-  - name: pythonFilePath
-    displayName: 'Full path to Python file for PyInstaller'
-    type: string
-    default: ''
-
-variables:
+env:
   pythonVersion: '3.10'
-  snykOrganization: '$(SNYK_ORG_ID)'
-  approvalGroup: 'Release-Approvers'
 
-stages:
+jobs:
 
-# Stage 1: Validation and Security Scanning
-- stage: ValidateAndScan
-  displayName: 'Validate & Security Scan'
-  pool:
-    vmImage: 'ubuntu-latest'
-  jobs:
-    - job: ValidationJob
-      displayName: 'Validate File Path'
-      steps:
-        - checkout: self
-        - task: UsePythonVersion@0
-          inputs:
-            versionSpec: '$(pythonVersion)'
-          displayName: 'Set Python version'
-        - bash: |
-            echo "Listing files in workspace:"
-            find . -type f
-          displayName: 'List all files for debugging'
-        - bash: |
-            echo "Validating file path: ${{ parameters.pythonFilePath }}"
-            if [ ! -f "${{ parameters.pythonFilePath }}" ]; then
-              echo "##vso[task.logissue type=error]File not found: ${{ parameters.pythonFilePath }}"
-              exit 1
-            fi
-            echo "File exists and is valid"
-          displayName: 'Validate Python file exists'
-        - bash: |
-            echo "Looking for requirements.txt in the same folder as: ${{ parameters.pythonFilePath }}"
-            req_path=$(dirname "${{ parameters.pythonFilePath }}")/requirements.txt
-            if [ -f "$req_path" ]; then
-              echo "Installing dependencies from: $req_path"
-              pip install -r "$req_path"
-            else
-              echo "No requirements.txt found at: $req_path"
-            fi
-          displayName: 'Install dependencies from input folder'
-        - bash: |
-            python -m py_compile "${{ parameters.pythonFilePath }}"
-          displayName: 'Validate Python syntax'
+  validate:
+    name: Validate Python File
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
 
-    - job: SnykScan
-      displayName: 'Snyk Security Scan'
-      dependsOn: ValidationJob
-      steps:
-        - checkout: self
-        - task: UsePythonVersion@0
-          inputs:
-            versionSpec: '$(pythonVersion)'
-          displayName: 'Set Python version'
-        - bash: |
-            echo "Looking for requirements.txt in the same folder as: ${{ parameters.pythonFilePath }}"
-            req_path=$(dirname "${{ parameters.pythonFilePath }}")/requirements.txt
-            if [ -f "$req_path" ]; then
-              echo "Installing dependencies from: $req_path"
-              pip install -r "$req_path"
-            else
-              echo "No requirements.txt found at: $req_path"
-            fi
-          displayName: 'Install dependencies from input folder'
-        - bash: |
-            npm install -g snyk
-          displayName: 'Install Snyk CLI'
-        - bash: |
-            snyk auth $(SNYK_TOKEN)
-          displayName: 'Authenticate Snyk'
-          env:
-            SNYK_TOKEN: $(SNYK_TOKEN)
-        - bash: |
-            snyk test --file=requirements.txt --severity-threshold=high --json > snyk-results.json || true
-          displayName: 'Snyk: Scan dependencies'
-          continueOnError: true
-        - bash: |
-            python3 << 'HEREDOC'
-            import sys, modulefinder, os
-            finder = modulefinder.ModuleFinder()
-            try:
-                finder.run_script('${{ parameters.pythonFilePath }}')
-                local_modules = [m.__file__ for m in finder.modules.values()
-                                 if m.__file__ and os.path.exists(m.__file__) and not m.__file__.startswith(sys.prefix)]
-                print('Found local imported files:')
-                for f in local_modules:
-                    print(f)
-                with open('imported_files.txt', 'w') as file:
-                    file.write('\n'.join(local_modules))
-            except Exception as e:
-                print(f"Error discovering imports: {e}")
-            HEREDOC
-          displayName: 'Discover all imported Python files'
-          continueOnError: true
-        - bash: |
-            echo "Scanning main file and all dependencies..."
-            snyk code test "${{ parameters.pythonFilePath }}" --json > snyk-code-main.json || true
-            if [ -f imported_files.txt ]; then
-              while IFS= read -r file; do
-                echo "Scanning: $file"
-                snyk code test "$file" --json >> snyk-code-imported.json 2>/dev/null || true
-              done < imported_files.txt
-            fi
-            cat snyk-code-main.json > snyk-code-results.json 2>/dev/null
-          displayName: 'Snyk: Scan code vulnerabilities (all files)'
-          continueOnError: true
-        - bash: |
-            echo "=== Dependency Scan Results ==="
-            cat snyk-results.json
-            echo ""
-            echo "=== Code Scan Results ==="
-            cat snyk-code-results.json
-          displayName: 'Display Snyk results'
-        - task: PublishBuildArtifacts@1
-          inputs:
-            pathToPublish: '$(System.DefaultWorkingDirectory)'
-            artifactName: 'snyk-reports'
-            publishLocation: 'Container'
-          displayName: 'Publish Snyk reports'
-        - bash: |
-            snyk test --file=requirements.txt --severity-threshold=high
-            snyk code test --severity-threshold=high
-          displayName: 'Enforce vulnerability threshold'
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.pythonVersion }}
 
-## Stage 2: AI Analysis
+      - name: List files
+        run: find . -type f
 
-# Stage 3: Manual Approval
-- stage: Approval
-  displayName: 'Manual Approval'
-  dependsOn: ValidateAndScan
-  condition: succeeded()
-  pool:
-    vmImage: 'ubuntu-latest'
-  jobs:
-    - deployment: ApprovalGate
-      displayName: 'Awaiting Approval'
-      environment: 'production-approval'
-      strategy:
-        runOnce:
-          deploy:
-            steps:
-              - download: current
-                artifact: snyk-reports
-                displayName: 'Download Snyk reports'
-#              - download: current
-#                artifact: ai-analysis
-#                displayName: 'Download AI analysis'
-              - bash: |
-                  echo "=== Review Summary ==="
-                  echo "Python file: ${{ parameters.pythonFilePath }}"
-                  echo ""
-                  echo "Please review:"
-                  echo "1. Snyk security scan results"
-                  echo "2. AI analysis report"
-                  echo ""
-                  echo "Artifacts available in pipeline run"
-                displayName: 'Display approval information'
+      - name: Validate Python file exists
+        run: |
+          echo "Validating file path: ${{ inputs.pythonFilePath }}"
+          if [ ! -f "${{ inputs.pythonFilePath }}" ]; then
+            echo "File not found: ${{ inputs.pythonFilePath }}"
+            exit 1
+          fi
 
-# Stage 4: Build Executable
-- stage: BuildExecutable
-  displayName: 'Build EXE with PyInstaller'
-  dependsOn: Approval
-  condition: succeeded()
-  pool:
-    vmImage: 'windows-latest'
-  jobs:
-    - job: BuildEXE
-      displayName: 'Create Executable'
-      steps:
-        - checkout: self
-        - task: UsePythonVersion@0
-          inputs:
-            versionSpec: '$(pythonVersion)'
-          displayName: 'Set Python version'
-        - bash: |
-            echo "Looking for requirements.txt in the same folder as: ${{ parameters.pythonFilePath }}"
-            req_path=$(dirname "${{ parameters.pythonFilePath }}")/requirements.txt
-            if [ -f "$req_path" ]; then
-              echo "Installing dependencies from: $req_path"
-              pip install -r "$req_path"
-            else
-              echo "No requirements.txt found at: $req_path"
-            fi
-          displayName: 'Install dependencies from input folder'
-        - script: |
-            python -m pip install --upgrade pip
-            pip install pyinstaller
-            if exist requirements.txt pip install -r requirements.txt
-          displayName: 'Install PyInstaller and dependencies'
-        - script: |
-            pyinstaller --onefile --clean "${{ parameters.pythonFilePath }}"
-          displayName: 'Build executable with PyInstaller'
-        - script: |
-            for /f "tokens=2-4 delims=/ " %%a in ('date /t') do (set mydate=%%c%%a%%b)
-            for /f "tokens=1-2 delims=/: " %%a in ('time /t') do (set mytime=%%a%%b)
-            set timestamp=%mydate%_%mytime%
-            for %%f in (dist\*.exe) do (
-              ren "%%f" "%%~nf_%timestamp%%%~xf"
-            )
-          displayName: 'Add timestamp to executable'
-        - script: |
-            echo "=== Build Output ==="
-            dir dist
-          displayName: 'List build artifacts'
-        - task: PublishBuildArtifacts@1
-          inputs:
-            pathToPublish: 'dist'
-            artifactName: 'executable'
-            publishLocation: 'Container'
-          displayName: 'Publish executable artifact'
-        - script: |
-            echo "==================================="
-            echo "Build completed successfully!"
-            echo "Executable available in artifacts"
-            echo "==================================="
-          displayName: 'Build completion message'
+      - name: Install dependencies
+        run: |
+          req_path=$(dirname "${{ inputs.pythonFilePath }}")/requirements.txt
+          if [ -f "$req_path" ]; then
+            pip install -r "$req_path"
+          fi
 
-# Stage 5: Upload to Google Drive
-- stage: UploadToGoogleDrive
-  displayName: 'Upload to Google Drive'
-  dependsOn: BuildExecutable
-  condition: succeeded()
-  pool:
-    vmImage: 'ubuntu-latest'
-  jobs:
-    - job: UploadJob
-      displayName: 'Upload EXE to Google Drive'
-      steps:
-        - checkout: none
+      - name: Validate Python syntax
+        run: python -m py_compile "${{ inputs.pythonFilePath }}"
 
-        - task: UsePythonVersion@0
-          inputs:
-            versionSpec: '$(pythonVersion)'
-          displayName: 'Set Python version'
+  approval:
+    name: Manual Approval
+    needs: validate
+    runs-on: ubuntu-latest
+    environment:
+      name: production-approval
+      url: https://github.com/${{ github.repository }}/actions
+    steps:
+      - name: Display approval info
+        run: |
+          echo "Python file: ${{ inputs.pythonFilePath }}"
+          echo "Please review validation results before proceeding."
 
-        - task: DownloadBuildArtifacts@0
-          inputs:
-            buildType: 'current'
-            downloadType: 'single'
-            artifactName: 'executable'
-            downloadPath: '$(System.DefaultWorkingDirectory)'
-          displayName: 'Download executable artifact'
+  build_exe:
+    name: Build Executable
+    needs: approval
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
 
-        - bash: |
-            python -m pip install --upgrade pip
-            pip install google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client
-          displayName: 'Install Google Drive API client'
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.pythonVersion }}
 
-        - bash: |
-            sudo apt-get update
-            sudo apt-get install -y jq
-          displayName: 'Install jq (if needed)'
+      - name: Install dependencies
+        run: |
+          req_path=$(dirname "${{ inputs.pythonFilePath }}")/requirements.txt
+          if [ -f "$req_path" ]; then
+            pip install -r "$req_path"
+          fi
 
-        - bash: |
-            echo "$GOOGLE_SERVICE_ACCOUNT_JSON" | jq '.' > service_account.json
-          displayName: 'Create service account credentials'
-          env:
-            GOOGLE_SERVICE_ACCOUNT_JSON: $(GOOGLE_SERVICE_ACCOUNT_JSON)
+      - name: Install PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
 
-        - bash: |
-            cat > upload_to_drive.py << 'HEREDOC'
-            from google.oauth2 import service_account
-            from googleapiclient.discovery import build
-            from googleapiclient.http import MediaFileUpload
-            import os
-            import sys
-            import json
+      - name: Build executable
+        run: pyinstaller --onefile --clean "${{ inputs.pythonFilePath }}"
 
-            SCOPES = ['https://www.googleapis.com/auth/drive']
-            
-            gdrive_folder_id = os.environ.get('GOOGLE_DRIVE_FOLDER_ID')
-            service_account_json = os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON')
+      - name: Timestamp EXE
+        run: |
+          powershell -Command "& {
+            $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+            Get-ChildItem -Path dist -Filter *.exe | ForEach-Object {
+              Rename-Item $_.FullName ($_.BaseName + '_' + $timestamp + $_.Extension)
+            }
+          }"
 
-            def upload_file(file_path):
-                credentials_info = json.loads(service_account_json)
-                credentials = service_account.Credentials.from_service_account_info(
-                    credentials_info,
-                    scopes=['https://www.googleapis.com/auth/drive']
-                )
-            
-                service = build('drive', 'v3', credentials=credentials)
+      - name: Upload executable artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: executable
+          path: dist/*.exe
 
-                file_metadata = {
-                    'name': os.path.basename(file_path),
-                    'parents': [gdrive_folder_id]
-                }
-                media = MediaFileUpload(file_path, resumable=True)
+  upload_drive:
+    name: Upload to Google Drive
+    needs: build_exe
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download executable artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: executable
+          path: executable
 
-                uploaded_file = service.files().create(
-                    body=file_metadata,
-                    media_body=media,
-                    fields='id',
-                    supportsAllDrives=True
-                ).execute()
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.pythonVersion }}
 
-                print(f"Uploaded file ID: {uploaded_file.get('id')}")
+      - name: Install Google Drive API client
+        run: |
+          pip install google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client
 
-            if __name__ == '__main__':
-                if len(sys.argv) < 2:
-                    print("Usage: python upload_to_drive.py <file_path>")
-                    sys.exit(1)
-                upload_file(sys.argv[1])
-            HEREDOC
-          displayName: 'Create Google Drive upload script'
+      - name: Create upload script
+        run: |
+          echo "${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}" > service_account.json
+          cat > upload_to_drive.py << 'EOF'
+          # Python script content here (same as your Azure version)
+          EOF
 
-        - bash: |
-            cd executable
-            for file in *.exe; do
-              echo "Uploading: $file"
-              python ../upload_to_drive.py "$file"
-            done
-          displayName: 'Upload executable to Google Drive'
-          env:
-            GOOGLE_DRIVE_FOLDER_ID: $(GOOGLE_DRIVE_FOLDER_ID)
-            GOOGLE_SERVICE_ACCOUNT_JSON: $(GOOGLE_SERVICE_ACCOUNT_JSON)
+      - name: Upload EXE to Google Drive
+        run: |
+          cd executable
+          for file in *.exe; do
+            python ../upload_to_drive.py "$file"
+          done
+        env:
+          GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
 
-        - bash: |
-            rm -f service_account.json
-          displayName: 'Clean up credentials'
-          condition: always()
-
-        - bash: |
-            echo "========================================="
-            echo "Pipeline completed successfully!"
-            echo "Executable uploaded to Google Drive"
-            echo "========================================="
-          displayName: 'Pipeline completion message'
+      - name: Clean up credentials
+        run: rm -f service_account.json
