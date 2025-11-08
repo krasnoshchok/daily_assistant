@@ -7,6 +7,7 @@ on:
 
 env:
   pythonVersion: '3.10'
+  pythonFilePath: 'app.py'
 
 jobs:
 
@@ -27,21 +28,20 @@ jobs:
 
       - name: Validate Python file exists
         run: |
-          echo "Validating file path: ${{ inputs.pythonFilePath }}"
-          if [ ! -f "${{ inputs.pythonFilePath }}" ]; then
-            echo "File not found: ${{ inputs.pythonFilePath }}"
+          echo "Validating file path: ${{ env.pythonFilePath }}"
+          if [ ! -f "${{ env.pythonFilePath }}" ]; then
+            echo "File not found: ${{ env.pythonFilePath }}"
             exit 1
           fi
 
       - name: Install dependencies
         run: |
-          req_path=$(dirname "${{ inputs.pythonFilePath }}")/requirements.txt
-          if [ -f "$req_path" ]; then
-            pip install -r "$req_path"
+          if [ -f "requirements.txt" ]; then
+            pip install -r requirements.txt
           fi
 
       - name: Validate Python syntax
-        run: python -m py_compile "${{ inputs.pythonFilePath }}"
+        run: python -m py_compile "${{ env.pythonFilePath }}"
 
   approval:
     name: Manual Approval
@@ -53,7 +53,7 @@ jobs:
     steps:
       - name: Display approval info
         run: |
-          echo "Python file: ${{ inputs.pythonFilePath }}"
+          echo "Python file: ${{ env.pythonFilePath }}"
           echo "Please review validation results before proceeding."
 
   build_exe:
@@ -71,10 +71,10 @@ jobs:
 
       - name: Install dependencies
         run: |
-          req_path=$(dirname "${{ inputs.pythonFilePath }}")/requirements.txt
-          if [ -f "$req_path" ]; then
-            pip install -r "$req_path"
-          fi
+          if (Test-Path "requirements.txt") {
+            pip install -r requirements.txt
+          }
+        shell: pwsh
 
       - name: Install PyInstaller
         run: |
@@ -82,16 +82,15 @@ jobs:
           pip install pyinstaller
 
       - name: Build executable
-        run: pyinstaller --onefile --clean "${{ inputs.pythonFilePath }}"
+        run: pyinstaller --onefile --clean "${{ env.pythonFilePath }}"
 
       - name: Timestamp EXE
         run: |
-          powershell -Command "& {
-            $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-            Get-ChildItem -Path dist -Filter *.exe | ForEach-Object {
-              Rename-Item $_.FullName ($_.BaseName + '_' + $timestamp + $_.Extension)
-            }
-          }"
+          $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+          Get-ChildItem -Path dist -Filter *.exe | ForEach-Object {
+            Rename-Item $_.FullName ($_.BaseName + '_' + $timestamp + $_.Extension)
+          }
+        shell: pwsh
 
       - name: Upload executable artifact
         uses: actions/upload-artifact@v3
@@ -121,7 +120,6 @@ jobs:
 
       - name: Create upload script
         run: |
-          echo "${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}" > service_account.json
           cat > upload_to_drive.py << 'EOF'
           from google.oauth2 import service_account
           from googleapiclient.discovery import build
