@@ -104,7 +104,7 @@ class DailyAssistant(ctk.CTk):
         self.appearance_option.set("Light")
 
     def clear_main_frame(self):
-        """Clear all widgets from main frame"""
+        """Clear all widgets from the main frame"""
         for widget in self.main_frame.winfo_children():
             widget.destroy()
 
