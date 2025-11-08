@@ -162,7 +162,8 @@ class SortPicturesTab:
         )
         browse_btn.pack(side=tk.LEFT)
 
-    def browse_folder(self, variable):
+    @staticmethod
+    def browse_folder(variable):
         """Open folder selection dialog"""
         folder = filedialog.askdirectory(title="Select Folder")
         if folder:
